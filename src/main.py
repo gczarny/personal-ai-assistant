@@ -2,7 +2,8 @@ import sys
 
 from loguru import logger
 
-from client.telegram_bot import TelegramBot
+from clients.openai_client import OpenAIClient
+from clients.telegram_bot import TelegramBot
 from core.settings import get_settings
 
 
@@ -35,7 +36,9 @@ if __name__ == "__main__":
 
     settings = get_settings()
 
-    bot = TelegramBot(settings.TELEGRAM_BOT_TOKEN.get_secret_value())
+    openai_client = OpenAIClient(settings.OPENAI_API_KEY.get_secret_value())
+    bot = TelegramBot(settings.TELEGRAM_BOT_TOKEN.get_secret_value(), openai_client)
+
     bot.run_bot()
 
     logger.info("Main script finished.")
