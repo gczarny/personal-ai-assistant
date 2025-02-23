@@ -12,6 +12,7 @@ pydantic-settings = "^2.8.0"
 python-telegram-bot = "^21.10"
 black = "^25.1.0"
 loguru = "^0.7.3"
+openai = "^1.64.0"
 
 
 [build-system]
