@@ -4,6 +4,8 @@ from openai import OpenAI, AuthenticationError, RateLimitError
 
 from loguru import logger
 
+from core.exceptions import NoChoicesError
+
 
 class OpenAIClient:
     def __init__(
@@ -43,7 +45,7 @@ class OpenAIClient:
                 max_tokens=effective_max_tokens,
             )
             if not completion.choices:
-                raise ValueError("No choices returned from OpenAI API")
+                raise NoChoicesError("No choices returned from OpenAI API")
 
             reply = completion.choices[0].message.content.strip()
             logger.info(f"Reply from openai: {reply}")
