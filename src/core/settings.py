@@ -5,10 +5,6 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def non_empty_field(**kwargs):
-    return Field(..., min_length=1, **kwargs)
-
-
 class Settings(BaseSettings):
     # TELEGRAM
     TELEGRAM_BOT_TOKEN: SecretStr = Field(..., validation_alias="TELEGRAM_BOT_TOKEN")
