@@ -3,7 +3,6 @@ import sys
 
 from loguru import logger
 
-from clients.imgbb_client import ImgBBClient
 from clients.openai_client import OpenAIClient
 from clients.telegram_bot import TelegramBot
 from core.settings import get_settings
