@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     # OPENAI
     OPENAI_API_KEY: SecretStr = Field(..., validation_alias="OPENAI_API_KEY")
 
+    # DATABASE
+    DATABASE_URL: str = "sqlite:///conversations.db"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

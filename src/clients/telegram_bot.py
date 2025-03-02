@@ -25,6 +25,9 @@ from core.exceptions import (
     APIAuthenticationError,
     APIRateLimitError,
 )
+from database.connection import Database
+from database.repository import ConversationRepository
+from utils.token_manager import TokenManager
 
 
 class TelegramBot:
@@ -35,6 +38,8 @@ class TelegramBot:
         token: str,
         openai_client: OpenAIClient,
         voice_config: Optional[VoiceProcessingConfig] = None,
+        database: Optional[Database] = None,
+        max_history_tokens: int = 4000,
     ):
         """
         Initialize the Telegram bot.
@@ -48,6 +53,19 @@ class TelegramBot:
         self.openai_client = openai_client
         self.conversations: Dict[int, List[Dict[str, str]]] = {}
         self.voice_config = voice_config or VoiceProcessingConfig()
+
+        # Database setup
+        self.database = database or Database()
+        self.database.create_tables()
+
+        # Token management
+        self.token_manager = TokenManager(
+            model_name=self.openai_client.config.model, max_tokens=max_history_tokens
+        )
+
+        # Temporary in-memory cache
+        self.conversations: Dict[int, List[Dict[str, str]]] = {}
+
         os.makedirs(
             os.path.join(os.getcwd(), self.voice_config.temp_directory), exist_ok=True
         )
@@ -56,6 +74,7 @@ class TelegramBot:
     def _register_handlers(self) -> None:
         """Register message handlers for different message types."""
         self.application.add_handler(CommandHandler("start", self._start_command))
+        self.application.add_handler(CommandHandler("clear", self._clear_command))
 
         # TEXT
         self.application.add_handler(
@@ -80,21 +99,51 @@ class TelegramBot:
 
     @staticmethod
     async def _unsupported_message_handler(
-        update: Update, context: ContextTypes.DEFAULT_TYPE
+        update: Update, context: ContextTypes.DEFAULT_TYPE # noqa
     ) -> None:
         """Handle unsupported message types."""
         await update.message.reply_text(
             "Sorry, I only support text, image, and voice messages."
         )
 
-    @staticmethod
+    async def _clear_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE # noqa
+    ) -> None:
+        """Handle the /clear command to reset conversation history."""
+        chat_id = update.effective_chat.id
+
+        with self.database.session() as session:
+            repo = ConversationRepository(session)
+            repo.clear_conversation(str(chat_id))
+
+        # Also clear from in-memory storage if it exists
+        if chat_id in self.conversations:
+            self.conversations[chat_id] = [
+                {"role": "system", "content": "You are a helpful assistant."}
+            ]
+
+        await update.message.reply_text(
+            "Conversation history has been cleared. What would you like to talk about now?"
+        )
+
     async def _start_command(
-        update: Update, context: ContextTypes.DEFAULT_TYPE
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle the /start command."""
-        logger.info(f"Handling /start command for chat_id={update.effective_chat.id}")
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id if update.effective_user else None
+
+        with self.database.session() as session:
+            repo = ConversationRepository(session)
+            repo.get_or_create_conversation(str(chat_id), user_id)
+
+            # Add system message if it doesn't exist
+            messages = repo.get_messages(str(chat_id))
+            if not messages or not any(msg.get("role") == "system" for msg in messages):
+                repo.add_message(str(chat_id), "system", "You are a helpful assistant.")
+
         await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+            chat_id=chat_id,
             text="Hello! I am your Telegram bot. I can process text, images, and voice messages. How can I help you?",
         )
 
@@ -104,24 +153,30 @@ class TelegramBot:
         """Handle text messages."""
         user_msg = update.message.text
         chat_id = update.effective_chat.id
+        user_name = update.effective_user.username if update.effective_user else None
 
         logger.info(
-            f"Received message '{user_msg[:50]}...' from chat_id={chat_id}"
+            f"Received message from chat_id={chat_id}: '{user_msg[:50]}...'"
             if len(user_msg) > 50
-            else f"Received message '{user_msg}' from chat_id={chat_id}"
+            else f"Received message from chat_id={chat_id}: '{user_msg}'"
         )
-
-        if chat_id not in self.conversations:
-            self.conversations[chat_id] = [
-                {"role": "system", "content": "You are a helpful assistant."}
-            ]
-        self.conversations[chat_id].append({"role": "user", "content": user_msg})
 
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
         try:
+            with self.database.session() as session:
+                repo = ConversationRepository(session)
+                repo.get_or_create_conversation(str(chat_id), user_name)
+                repo.add_message(str(chat_id), "user", user_msg)
+
+                # Get conversation history
+                messages = repo.get_messages(str(chat_id))
+
+                # Apply token limit
+                trimmed_messages = self.token_manager.trim_messages_to_fit(messages)
+
             openai_result = await asyncio.to_thread(
-                self.openai_client.create_chat_completion, self.conversations[chat_id]
+                self.openai_client.create_chat_completion, trimmed_messages
             )
 
             if not openai_result.success:
@@ -131,9 +186,22 @@ class TelegramBot:
                 await update.message.reply_text(error_message)
                 return
 
+            with self.database.session() as session:
+                repo = ConversationRepository(session)
+                repo.add_message(str(chat_id), "assistant", openai_result.value)
+
+            # Update in-memory store for compatibility with voice/image
+            if chat_id not in self.conversations:
+                self.conversations[chat_id] = [
+                    {"role": "system", "content": "You are a helpful assistant."}
+                ]
+
+            # Keep in-memory storage synchronized
+            self.conversations[chat_id].append({"role": "user", "content": user_msg})
             self.conversations[chat_id].append(
                 {"role": "assistant", "content": openai_result.value}
             )
+
             await update.message.reply_text(openai_result.value)
 
         except Exception as e:

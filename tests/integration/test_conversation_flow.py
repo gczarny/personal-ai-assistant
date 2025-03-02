@@ -8,17 +8,21 @@ from core.result import Result
 
 
 @pytest.mark.asyncio
-async def test_conversation_continuity_with_voice(telegram_bot, mock_openai_client):
-    # Configure mock OpenAI client with specific responses for this test
+async def test_conversation_continuity_with_db(
+    telegram_bot, mock_openai_client, mock_repository
+):
+    # Configure mock OpenAI client responses
     mock_openai_client.create_chat_completion.side_effect = [
         Result.ok("Hello! How can I help you?"),
         Result.ok("I understand you're asking about the weather. It's sunny today."),
     ]
-    mock_openai_client.transcribe_audio.return_value = Result.ok(
-        "What's the weather like?"
-    )
 
-    # Mock objects for text message
+    # Mock initial message retrieval
+    mock_repository.get_messages.return_value = [
+        {"role": "system", "content": "You are a helpful assistant."}
+    ]
+
+    # First message setup
     mock_text_message = MagicMock(spec=Message)
     mock_text_message.text = "Hello bot"
     mock_text_message.reply_text = AsyncMock()
@@ -27,41 +31,50 @@ async def test_conversation_continuity_with_voice(telegram_bot, mock_openai_clie
     mock_text_update.message = mock_text_message
     mock_text_update.effective_chat = MagicMock(spec=Chat)
     mock_text_update.effective_chat.id = 12345
+    mock_text_update.effective_user = None
 
     mock_text_context = MagicMock()
     mock_text_context.bot = MagicMock()
     mock_text_context.bot.send_chat_action = AsyncMock()
 
-    # Process text message
     await telegram_bot._text_handler(mock_text_update, mock_text_context)
 
-    # Verify first message handled correctly
-    assert 12345 in telegram_bot.conversations
-    assert len(telegram_bot.conversations[12345]) == 3  # system + user + assistant
-    assert telegram_bot.conversations[12345][0]["role"] == "system"
-    assert telegram_bot.conversations[12345][1]["role"] == "user"
-    assert telegram_bot.conversations[12345][1]["content"] == "Hello bot"
-    assert telegram_bot.conversations[12345][2]["role"] == "assistant"
-    assert (
-        telegram_bot.conversations[12345][2]["content"] == "Hello! How can I help you?"
+    mock_repository.get_or_create_conversation.assert_called_with("12345", None)
+    mock_repository.add_message.assert_any_call("12345", "user", "Hello bot")
+    mock_repository.add_message.assert_any_call(
+        "12345", "assistant", "Hello! How can I help you?"
     )
 
-    # Directly add the transcribed text to conversation (simulating what _voice_handler would do)
+    # Update mock repository for second message
+    mock_repository.get_messages.return_value = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Hello bot"},
+        {"role": "assistant", "content": "Hello! How can I help you?"},
+    ]
+
+    # Second message (simulating voice message transcription)
     telegram_bot.conversations[12345].append(
         {"role": "user", "content": "What's the weather like?"}
     )
 
-    # Simulate getting a response from OpenAI
+    mock_repository.get_messages.return_value = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Hello bot"},
+        {"role": "assistant", "content": "Hello! How can I help you?"},
+        {"role": "user", "content": "What's the weather like?"},
+    ]
+
     completion_result = await asyncio.to_thread(
-        mock_openai_client.create_chat_completion, telegram_bot.conversations[12345]
+        mock_openai_client.create_chat_completion,
+        mock_repository.get_messages.return_value,
     )
 
     if completion_result.success:
+        # Add to in-memory conversation as voice handler would
         telegram_bot.conversations[12345].append(
             {"role": "assistant", "content": completion_result.value}
         )
 
-    # Verify conversation continuity
     assert (
         len(telegram_bot.conversations[12345]) == 5
     )  # system + user + assistant + user + assistant
