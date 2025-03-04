@@ -6,6 +6,7 @@ from loguru import logger
 from clients.openai_client import OpenAIClient
 from clients.telegram_bot import TelegramBot
 from core.settings import get_settings
+from database.connection import Database
 
 
 def configure_logging() -> None:
@@ -37,8 +38,16 @@ if __name__ == "__main__":
 
     settings = get_settings()
 
+    database = Database(db_url=settings.DATABASE_URL)
+    database.create_tables()
+
     openai_client = OpenAIClient(settings.OPENAI_API_KEY.get_secret_value())
-    bot = TelegramBot(settings.TELEGRAM_BOT_TOKEN.get_secret_value(), openai_client)
+    bot = TelegramBot(
+        token=settings.TELEGRAM_BOT_TOKEN.get_secret_value(),
+        openai_client=openai_client,
+        database=database,
+        max_history_tokens=3500,
+    )
 
     def shutdown(signum, frame):  # noqa
         logger.info("Received shutdown signal. Stopping bot...")

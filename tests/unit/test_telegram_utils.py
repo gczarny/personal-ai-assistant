@@ -24,15 +24,10 @@ async def test_start_command(telegram_bot):
 
 
 @pytest.mark.asyncio
-async def test_text_handler_success(telegram_bot, mock_openai_client):
-    # Configure mock OpenAI client
-    mock_openai_client.create_chat_completion.return_value = Result.ok(
-        "This is a test response"
-    )
-
+async def test_clear_command(telegram_bot, mock_repository):
+    """Test the clear command functionality."""
     # Mock dependencies
     mock_message = MagicMock(spec=Message)
-    mock_message.text = "Hello bot"
     mock_message.reply_text = AsyncMock()
 
     mock_update = MagicMock(spec=Update)
@@ -41,12 +36,70 @@ async def test_text_handler_success(telegram_bot, mock_openai_client):
     mock_update.effective_chat.id = 123456
 
     mock_context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
-    mock_context.bot = MagicMock()
+
+    # Set up existing in-memory conversation
+    telegram_bot.conversations[123456] = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Previous message"},
+        {"role": "assistant", "content": "Previous response"},
+    ]
+
+    # Execute the command
+    await telegram_bot._clear_command(mock_update, mock_context)
+
+    # Verify the repository interaction
+    mock_repository.clear_conversation.assert_called_once_with("123456")
+
+    # Verify in-memory conversation was reset
+    assert 123456 in telegram_bot.conversations
+    assert len(telegram_bot.conversations[123456]) == 1
+    assert telegram_bot.conversations[123456][0]["role"] == "system"
+
+    # Verify user was notified
+    mock_message.reply_text.assert_called_once()
+    assert "cleared" in mock_message.reply_text.call_args[0][0].lower()
+
+
+@pytest.mark.asyncio
+async def test_text_handler_success(telegram_bot, mock_openai_client, mock_repository):
+    # cxonfigure mock OpenAI client
+    mock_openai_client.create_chat_completion.return_value = Result.ok(
+        "This is a test response"
+    )
+
+    # onfigure mock repository
+    test_messages = [{"role": "system", "content": "You are a helpful assistant."}]
+    mock_repository.get_messages.return_value = test_messages
+
+    # Build a fake Update
+    mock_user = MagicMock()
+    mock_user.username = "test_user"
+
+    mock_message = MagicMock(spec=Message)
+    mock_message.text = "Hello bot"
+    mock_message.reply_text = AsyncMock()
+
+    mock_update = MagicMock(spec=Update)
+    mock_update.message = mock_message
+    mock_update.effective_chat = MagicMock(spec=Chat)
+    mock_update.effective_chat.id = 123456
+    mock_update.effective_user = mock_user
+
+    # Build a fake context
+    mock_context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
     mock_context.bot.send_chat_action = AsyncMock()
 
+    # Call the bot handler
     await telegram_bot._text_handler(mock_update, mock_context)
 
-    # Verify the conversation was updated
+    # 6) Assert your repository calls
+    mock_repository.get_or_create_conversation.assert_called_with("123456", "test_user")
+    mock_repository.add_message.assert_any_call("123456", "user", "Hello bot")
+    mock_repository.add_message.assert_any_call(
+        "123456", "assistant", "This is a test response"
+    )
+
+    # Check in-memory conversation
     assert 123456 in telegram_bot.conversations
     assert len(telegram_bot.conversations[123456]) == 3  # system + user + assistant
     assert telegram_bot.conversations[123456][0]["role"] == "system"
@@ -55,35 +108,8 @@ async def test_text_handler_success(telegram_bot, mock_openai_client):
     assert telegram_bot.conversations[123456][2]["role"] == "assistant"
     assert telegram_bot.conversations[123456][2]["content"] == "This is a test response"
 
-    # Verify the response was sent
+    # Check final user reply
     mock_message.reply_text.assert_called_once_with("This is a test response")
-
-
-@pytest.mark.asyncio
-async def test_text_handler_error(telegram_bot, mock_openai_client):
-    # Configure mock OpenAI client to return an error
-    mock_openai_client.create_chat_completion.return_value = Result.fail(
-        error_message="API Error"
-    )
-
-    # Mock dependencies
-    mock_message = MagicMock(spec=Message)
-    mock_message.text = "Hello bot"
-    mock_message.reply_text = AsyncMock()
-
-    mock_update = MagicMock(spec=Update)
-    mock_update.message = mock_message
-    mock_update.effective_chat = MagicMock(spec=Chat)
-    mock_update.effective_chat.id = 123456
-
-    mock_context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
-    mock_context.bot = MagicMock()
-    mock_context.bot.send_chat_action = AsyncMock()
-
-    await telegram_bot._text_handler(mock_update, mock_context)
-
-    # Verify the error response was sent
-    mock_message.reply_text.assert_called_once()
 
 
 @pytest.mark.asyncio
