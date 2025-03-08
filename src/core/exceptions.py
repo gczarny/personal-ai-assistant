@@ -30,6 +30,12 @@ class AudioFileTooLargeError(AudioTranscriptionError):
     pass
 
 
+class ImageGenerationError(BaseAppException):
+    """Raised when there's an error generating an image."""
+
+    pass
+
+
 class APIAuthenticationError(BaseAppException):
     """Raised when authentication with an external API fails."""
 
