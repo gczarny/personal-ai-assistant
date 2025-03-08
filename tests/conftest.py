@@ -1,11 +1,12 @@
 import os
 import pytest
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 from pydub import AudioSegment
 
 from clients.openai_client import OpenAIClient
 from clients.telegram_bot import TelegramBot
+from core.constants import OpenAIModels
 from database.repository import ConversationRepository
 
 
@@ -15,10 +16,15 @@ def mock_openai_client():
     from core.result import Result
 
     client = MagicMock(spec=OpenAIClient)
-    client.create_chat_completion.return_value = Result.ok("This is a test response")
+    client.create_chat_completion.return_value = AsyncMock(
+        return_value=Result.ok("This is a test response")
+    )
     client.transcribe_audio.return_value = Result.ok("This is a test transcription")
+    client.search_web = AsyncMock(
+        return_value={"answer": "Test search result", "results": []}
+    )
     client.config = MagicMock()
-    client.config.model = "gpt-4o"
+    client.config.model = OpenAIModels.GPT_4O
     return client
 
 

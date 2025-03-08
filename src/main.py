@@ -41,12 +41,27 @@ if __name__ == "__main__":
     database = Database(db_url=settings.DATABASE_URL)
     database.create_tables()
 
-    openai_client = OpenAIClient(settings.OPENAI_API_KEY.get_secret_value())
+    tavily_api_key = (
+        settings.TAVILY_API_KEY.get_secret_value()
+        if settings.TAVILY_API_KEY.get_secret_value()
+        else None
+    )
+
+    if tavily_api_key:
+        logger.info("Tavily API key provided - web search functionality enabled")
+    else:
+        logger.warning("No Tavily API key provided - web search functionality disabled")
+
+    openai_client = OpenAIClient(
+        api_key=settings.OPENAI_API_KEY.get_secret_value(),
+        tavily_api_key=tavily_api_key,
+    )
     bot = TelegramBot(
         token=settings.TELEGRAM_BOT_TOKEN.get_secret_value(),
         openai_client=openai_client,
         database=database,
         max_history_tokens=3500,
+        enable_web_search=bool(tavily_api_key),
     )
 
     def shutdown(signum, frame):  # noqa
