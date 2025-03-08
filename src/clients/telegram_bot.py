@@ -99,7 +99,7 @@ class TelegramBot:
 
     @staticmethod
     async def _unsupported_message_handler(
-        update: Update, context: ContextTypes.DEFAULT_TYPE # noqa
+        update: Update, context: ContextTypes.DEFAULT_TYPE  # noqa
     ) -> None:
         """Handle unsupported message types."""
         await update.message.reply_text(
@@ -107,7 +107,7 @@ class TelegramBot:
         )
 
     async def _clear_command(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE # noqa
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE  # noqa
     ) -> None:
         """Handle the /clear command to reset conversation history."""
         chat_id = update.effective_chat.id
