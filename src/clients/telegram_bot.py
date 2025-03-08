@@ -1,6 +1,7 @@
 # src/clients/telegram_bot.py
 import asyncio
 import base64
+import json
 import os
 from io import BytesIO
 from typing import Dict, List, Optional
@@ -43,6 +44,7 @@ class TelegramBot:
         voice_config: Optional[VoiceProcessingConfig] = None,
         database: Optional[Database] = None,
         max_history_tokens: int = 4000,
+        enable_web_search: bool = True,
     ):
         """
         Initialize the Telegram bot.
@@ -65,7 +67,7 @@ class TelegramBot:
         self.token_manager = TokenManager(
             model_name=self.openai_client.config.model, max_tokens=max_history_tokens
         )
-
+        self.enable_web_search = enable_web_search
         # Temporary in-memory cache
         self.conversations: Dict[int, List[Dict[str, str]]] = {}
 
@@ -79,6 +81,12 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("start", self._start_command))
         self.application.add_handler(CommandHandler("clear", self._clear_command))
         self.application.add_handler(CommandHandler("imagine", self._imagine_command))
+        self.application.add_handler(
+            CommandHandler("websearch", self._toggle_web_search_command)
+        )
+        self.application.add_handler(
+            CommandHandler("search", self._explicit_search_command)
+        )
 
         # TEXT
         self.application.add_handler(
@@ -146,9 +154,22 @@ class TelegramBot:
             if not messages or not any(msg.get("role") == "system" for msg in messages):
                 repo.add_message(str(chat_id), "system", "You are a helpful assistant.")
 
+        if not hasattr(context, "user_data") or chat_id not in context.user_data:
+            context.user_data[chat_id] = {"web_search_enabled": self.enable_web_search}
+
+        web_search_status = (
+            "enabled"
+            if context.user_data[chat_id].get("web_search_enabled", False)
+            else "disabled"
+        )
+
         await context.bot.send_message(
             chat_id=chat_id,
-            text="Hello! I am your Telegram bot. I can process text, images, and voice messages. How can I help you?",
+            text=f"Hello! I am your Telegram bot. I can process text, images, and voice messages.\n\n"
+            f"I can also generate images based on your descriptions using /imagine command.\n\n"
+            f"Web search is currently {web_search_status}. You can toggle it with /websearch command "
+            f"or use /search for explicit web searches.\n\n"
+            f"How can I help you?",
         )
 
     async def _process_image(
@@ -181,10 +202,8 @@ class TelegramBot:
                 }
             ]
 
-            openai_result = await asyncio.to_thread(
-                self.openai_client.create_chat_completion,
-                messages,
-                model=OpenAIModels.GPT_4O,
+            openai_result = await self.openai_client.create_chat_completion(
+                messages, model=OpenAIModels.GPT_4O
             )
 
             if not openai_result.success:
@@ -302,10 +321,13 @@ class TelegramBot:
                 # Apply token limit
                 trimmed_messages = self.token_manager.trim_messages_to_fit(messages)
 
-            openai_result = await asyncio.to_thread(
-                self.openai_client.create_chat_completion, trimmed_messages
+            web_search_enabled = context.user_data.get(chat_id, {}).get(
+                "web_search_enabled", self.enable_web_search
             )
 
+            openai_result = await self.openai_client.create_chat_completion(
+                trimmed_messages, enable_web_search=web_search_enabled
+            )
             if not openai_result.success:
                 error_message = self._get_user_friendly_error_message(
                     openai_result.error
@@ -465,9 +487,11 @@ class TelegramBot:
                 chat_id=chat_id, action=ChatAction.TYPING
             )
 
-            completion_result = await asyncio.to_thread(
-                self.openai_client.create_chat_completion,
-                self.conversations[chat_id],
+            web_search_enabled = context.user_data.get(chat_id, {}).get(
+                "web_search_enabled", self.enable_web_search
+            )
+            completion_result = await self.openai_client.create_chat_completion(
+                self.conversations[chat_id], enable_web_search=web_search_enabled
             )
 
             if not completion_result.success:
@@ -495,6 +519,111 @@ class TelegramBot:
                         os.remove(path)
                 except Exception as e:
                     logger.warning(f"Failed to clean up temp file {path}: {e}")
+
+    async def _toggle_web_search_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        chat_id = update.effective_chat.id
+
+        if not hasattr(context, "user_data") or chat_id not in context.user_data:
+            context.user_data[chat_id] = {"web_search_enabled": self.enable_web_search}
+
+        current_setting = context.user_data[chat_id].get("web_search_enabled", False)
+        context.user_data[chat_id]["web_search_enabled"] = not current_setting
+        new_status = (
+            "enabled"
+            if context.user_data[chat_id]["web_search_enabled"]
+            else "disabled"
+        )
+
+        logger.info(f"Web search for chat_id={chat_id} is now {new_status}")
+
+        await update.message.reply_text(
+            f"Web search is now {new_status}. "
+            f"I {'will' if new_status == 'enabled' else 'will not'} search the web for information when needed."
+        )
+
+    async def _explicit_search_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Explicitly search the web for information."""
+        chat_id = update.effective_chat.id
+        query = update.message.text.replace("/search", "").strip()
+
+        if not query:
+            await update.message.reply_text(
+                "Please provide a search query. Example: /search latest AI research papers"
+            )
+            return
+
+        logger.info(f"Explicit web search request from chat_id={chat_id}: '{query}'")
+
+        if not self.openai_client.tavily_manager:
+            await update.message.reply_text(
+                "Web search functionality is not available. Please check with the administrator."
+            )
+            return
+
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+        status_message = await update.message.reply_text(
+            "🔎 Searching the web for information..."
+        )
+
+        try:
+            search_result = await self.openai_client.search_web(query)
+
+            if "error" in search_result:
+                await update.message.reply_text(
+                    f"Search error: {search_result['error']}"
+                )
+                return
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant with access to web search results.",
+                },
+                {
+                    "role": "user",
+                    "content": f"I searched for '{query}' and got these results. Please summarize the information in a helpful way.",
+                },
+                {
+                    "role": "system",
+                    "content": f"Search results: {json.dumps(search_result)}",
+                },
+            ]
+
+            openai_result = await self.openai_client.create_chat_completion(
+                messages,
+                enable_web_search=False,
+            )
+
+            await context.bot.delete_message(
+                chat_id=chat_id, message_id=status_message.message_id
+            )
+
+            if not openai_result.success:
+                error_message = self._get_user_friendly_error_message(
+                    openai_result.error
+                )
+                await update.message.reply_text(error_message)
+                return
+
+            response = f"📊 Search results for: {query}\n\n{openai_result.value}"
+
+            await update.message.reply_text(response)
+
+            with self.database.session() as session:
+                repo = ConversationRepository(session)
+                repo.add_message(str(chat_id), "user", f"/search {query}")
+                repo.add_message(str(chat_id), "assistant", response)
+
+        except Exception as e:
+            logger.error(f"Error processing search request: {e}")
+            await update.message.reply_text(
+                "Sorry, I encountered an error while searching. Please try again later."
+            )
 
     @staticmethod
     def _get_user_friendly_error_message(

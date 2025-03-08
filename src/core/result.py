@@ -46,3 +46,4 @@ class Result(Generic[T]):
 TranscriptionResult = Result[str]
 ChatCompletionResult = Result[str]
 ImageGenerationResult = Result[str]
+SearchResult = Result[str]

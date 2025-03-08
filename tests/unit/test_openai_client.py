@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from clients.openai_client import OpenAIClient
+from core.constants import OpenAIModels
 from core.exceptions import (
     AudioFileNotFoundError,
     AudioFileTooLargeError,
@@ -19,7 +20,7 @@ class TestOpenAIClient:
 
     def test_init(self):
         assert self.client.config.api_key == self.api_key
-        assert self.client.config.model == "gpt-4o"
+        assert self.client.config.model == OpenAIModels.GPT_4O
         assert self.client.config.temperature == 0.6
         assert self.client.config.max_tokens == 150
 
@@ -83,7 +84,8 @@ class TestOpenAIClient:
             assert isinstance(result.error, APIError)
             assert "Unexpected error during transcription" in result.error_message
 
-    def test_chat_completion_success(self):
+    @pytest.mark.asyncio
+    async def test_chat_completion_success(self):
         # Mock the OpenAI API response
         mock_choice = MagicMock()
         mock_choice.message.content = "This is a test response"
@@ -97,14 +99,15 @@ class TestOpenAIClient:
         # Create test messages
         messages = [{"role": "user", "content": "Hello"}]
 
-        result = self.client.create_chat_completion(messages)
+        result = await self.client.create_chat_completion(messages)
 
         assert result.success
         assert result.value == "This is a test response"
         assert result.metadata["finish_reason"] == "stop"
         self.client.client.chat.completions.create.assert_called_once()
 
-    def test_chat_completion_no_choices(self):
+    @pytest.mark.asyncio
+    async def test_chat_completion_no_choices(self):
         # Mock the OpenAI API response with no choices
         mock_completion = MagicMock()
         mock_completion.choices = []
@@ -113,12 +116,13 @@ class TestOpenAIClient:
 
         messages = [{"role": "user", "content": "Hello"}]
 
-        result = self.client.create_chat_completion(messages)
+        result = await self.client.create_chat_completion(messages)
 
         assert not result.success
         assert "No choices returned" in result.error_message
 
-    def test_chat_completion_authentication_error(self):
+    @pytest.mark.asyncio
+    async def test_chat_completion_authentication_error(self):
         # Simulate an authentication error
         self.client.client.chat.completions.create.side_effect = MagicMock(
             side_effect=Exception("Authentication Error")
@@ -126,7 +130,7 @@ class TestOpenAIClient:
 
         messages = [{"role": "user", "content": "Hello"}]
 
-        result = self.client.create_chat_completion(messages)
+        result = await self.client.create_chat_completion(messages)
 
         assert not result.success
-        assert "Unexpected error" in result.error_message
+        assert "Authentication failed with OpenAI API" in result.error_message

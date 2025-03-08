@@ -3,9 +3,11 @@ from typing import List, Dict
 
 import tiktoken
 
+from core.constants import OpenAIModels
+
 
 class TokenManager:
-    def __init__(self, model_name: str = "gpt-4o", max_tokens: int = 4000):
+    def __init__(self, model_name: str = OpenAIModels.GPT_4O, max_tokens: int = 4000):
         self.encoding = tiktoken.encoding_for_model(model_name)
         self.max_tokens = max_tokens
 

@@ -2,7 +2,7 @@
 from utils.token_manager import TokenManager
 
 
-def test_token_manager_trim_messages():
+def test_token_manager_trim_messages(mock_openai_client):
     """Test that the TokenManager correctly trims messages to fit within token limits."""
     # Create test messages
     messages = [
@@ -16,7 +16,9 @@ def test_token_manager_trim_messages():
         },
     ]
 
-    token_manager = TokenManager(model_name="gpt-4o", max_tokens=10)
+    token_manager = TokenManager(
+        model_name=mock_openai_client.config.model, max_tokens=10
+    )
 
     token_manager.estimate_tokens = lambda msgs: sum(5 for _ in msgs)
 

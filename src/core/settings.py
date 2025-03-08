@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # DATABASE
     DATABASE_URL: str = "sqlite:///conversations.db"
 
+    # TAVILY
+    TAVILY_API_KEY: SecretStr = Field(..., validation_alias="TAVILY_API_KEY")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
