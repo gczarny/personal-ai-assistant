@@ -1,12 +1,19 @@
 import os
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Literal
 
 from openai import OpenAI, AuthenticationError, RateLimitError
 
 from loguru import logger
 
 from clients.models import OpenAIClientConfig
+from core.constants import (
+    OpenAIModels,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_MAX_TOKENS,
+    ImageSizes,
+    ImageQuality,
+)
 from core.exceptions import (
     NoChoicesError,
     APIAuthenticationError,
@@ -14,17 +21,18 @@ from core.exceptions import (
     APIError,
     AudioFileNotFoundError,
     AudioFileTooLargeError,
+    ImageGenerationError,
 )
-from core.result import TranscriptionResult, ChatCompletionResult
+from core.result import TranscriptionResult, ChatCompletionResult, ImageGenerationResult
 
 
 class OpenAIClient:
     def __init__(
         self,
         api_key: str,
-        model: str = "gpt-4o",
-        temperature: float = 0.6,
-        max_tokens: int = 150,
+        model: str = OpenAIModels.DEFAULT_CHAT_MODEL,
+        temperature: float = DEFAULT_TEMPERATURE,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
         max_audio_size_mb: float = 25.0,
     ):
         self.config = OpenAIClientConfig(
@@ -45,7 +53,7 @@ class OpenAIClient:
         model: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-    ) -> str:
+    ) -> ChatCompletionResult:
         try:
             effective_model = model or self.config.model
             effective_temperature = (
@@ -114,7 +122,7 @@ class OpenAIClient:
 
             with open(audio_file_path, "rb") as audio_file:
                 transcription = self.client.audio.transcriptions.create(
-                    model="whisper-1", file=audio_file
+                    model=OpenAIModels.DEFAULT_TRANSCRIPTION_MODEL, file=audio_file
                 )
 
             transcribed_text = transcription.text
@@ -138,3 +146,66 @@ class OpenAIClient:
             error = APIError(f"Unexpected error during transcription: {str(e)}")
             logger.error(f"Unexpected error during transcription: {str(e)}")
             return TranscriptionResult.fail(error=error)
+
+    def generate_image(
+        self,
+        prompt: str,
+        size: Literal[
+            "256x256", "512x512", "1024x1024", "1792x1024", "1024x1792"
+        ] = ImageSizes.DEFAULT,
+        quality: Literal["standard", "hd"] = ImageQuality.DEFAULT,
+        model: str = OpenAIModels.DEFAULT_IMAGE_MODEL,
+        n: int = 1,
+    ) -> ImageGenerationResult:
+        try:
+            logger.info(f"Generating image with prompt: {prompt}")
+
+            if not prompt or prompt.strip() == "":
+                error = ImageGenerationError("Empty or invalid prompt provided")
+                logger.error(str(error))
+                return ImageGenerationResult.fail(error=error)
+
+            response = self.client.images.generate(
+                prompt=prompt,
+                size=size,
+                quality=quality,
+                model=model,
+                n=n,
+            )
+
+            if not response.data or len(response.data) == 0:
+                error = ImageGenerationError("No images generated from API")
+                logger.error(str(error))
+                return ImageGenerationResult.fail(error=error)
+
+            image_url = response.data[0].url
+
+            metadata = {
+                "model": model,
+                "size": size,
+                "quality": quality,
+                "revised_prompt": getattr(response.data[0], "revised_prompt", prompt),
+            }
+
+            logger.info(f"Successfully generated image, URL: {image_url[:30]}")
+
+            return ImageGenerationResult.ok(image_url, metadata=metadata)
+
+        except AuthenticationError as e:
+            error = APIAuthenticationError(
+                "Authentication failed with OpenAI image generation API"
+            )
+            logger.error(f"Authentication error during image generation: {str(e)}")
+            return ImageGenerationResult.fail(error=error)
+
+        except RateLimitError as e:
+            error = APIRateLimitError(
+                "Rate limit exceeded with OpenAI image generation API"
+            )
+            logger.error(f"Rate limit error during image generation: {str(e)}")
+            return ImageGenerationResult.fail(error=error)
+
+        except Exception as e:
+            error = APIError(f"Unexpected error during image generation: {str(e)}")
+            logger.error(f"Unexpected error during image generation: {str(e)}")
+            return ImageGenerationResult.fail(error=error)

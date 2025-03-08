@@ -5,6 +5,7 @@ import os
 from io import BytesIO
 from typing import Dict, List, Optional
 
+import aiohttp
 from loguru import logger
 from pydub import AudioSegment
 from telegram import Update
@@ -19,11 +20,13 @@ from telegram.ext import (
 
 from clients.models import VoiceProcessingConfig
 from clients.openai_client import OpenAIClient
+from core.constants import OpenAIModels
 from core.exceptions import (
     AudioFileNotFoundError,
     AudioFileTooLargeError,
     APIAuthenticationError,
     APIRateLimitError,
+    ImageGenerationError,
 )
 from database.connection import Database
 from database.repository import ConversationRepository
@@ -75,6 +78,7 @@ class TelegramBot:
         """Register message handlers for different message types."""
         self.application.add_handler(CommandHandler("start", self._start_command))
         self.application.add_handler(CommandHandler("clear", self._clear_command))
+        self.application.add_handler(CommandHandler("imagine", self._imagine_command))
 
         # TEXT
         self.application.add_handler(
@@ -146,6 +150,129 @@ class TelegramBot:
             chat_id=chat_id,
             text="Hello! I am your Telegram bot. I can process text, images, and voice messages. How can I help you?",
         )
+
+    async def _process_image(
+        self, image_data: bytes, caption: str, file_path: str
+    ) -> str:
+        try:
+            base64_image = base64.b64encode(image_data).decode("utf-8")
+
+            mime_types = {
+                "jpg": "image/jpeg",
+                "jpeg": "image/jpeg",
+                "png": "image/png",
+                "gif": "image/gif",
+            }
+
+            file_extension = file_path.split(".")[-1].lower()
+            mime_type = mime_types.get(file_extension)
+            if not mime_type:
+                raise ValueError(f"Unsupported image format: {file_extension}")
+
+            image_content = f"data:{mime_type};base64,{base64_image}"
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": caption},
+                        {"type": "image_url", "image_url": {"url": image_content}},
+                    ],
+                }
+            ]
+
+            openai_result = await asyncio.to_thread(
+                self.openai_client.create_chat_completion,
+                messages,
+                model=OpenAIModels.GPT_4O,
+            )
+
+            if not openai_result.success:
+                return self._get_user_friendly_error_message(openai_result.error)
+
+            return openai_result.value
+
+        except Exception as e:
+            logger.error(f"Error in process_image: {e}")
+            raise
+
+    async def _imagine_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle the /imagine command to generate images."""
+        chat_id = update.effective_chat.id
+        prompt = update.message.text.replace("/imagine", "").strip()
+
+        if not prompt:
+            await update.message.reply_text(
+                "Please provide some description for the image if you would like me to generate one.\n"
+                "Example: /imagine a cat playing the piano"
+            )
+            return
+
+        logger.info(
+            f"Received image generation request from chat_id={chat_id}: '{prompt}'"
+        )
+
+        await context.bot.send_chat_action(
+            chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO
+        )
+
+        status_msg = await update.message.reply_text(
+            "🎨 Generating image... This may take a few seconds."
+        )
+
+        try:
+            image_result = await asyncio.to_thread(
+                self.openai_client.generate_image, prompt
+            )
+
+            if not image_result.success:
+                error_message = self._get_user_friendly_error_message(
+                    image_result.error,
+                    default_message="I couldn't generate that image. Please try again with a different description.",
+                )
+                await update.message.reply_text(error_message)
+                return
+
+            image_url = image_result.value
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(image_url) as response:
+                    if response.status != 200:
+                        await update.message.reply_text(
+                            "I generated an image, but had trouble downloading it. Please try again."
+                        )
+                        return
+
+                    image_data = await response.read()
+
+            await context.bot.delete_message(
+                chat_id=chat_id, message_id=status_msg.message_id
+            )
+
+            if image_result.metadata and "revised_prompt" in image_result.metadata:
+                revised_prompt = image_result.metadata["revised_prompt"]
+                if revised_prompt != prompt:
+                    logger.info(f"Model revised prompt: '{revised_prompt}'")
+
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=image_data,
+                caption=f'Here\'s what I imagined for: "{prompt}"',
+            )
+
+            with self.database.session() as session:
+                repo = ConversationRepository(session)
+                repo.add_message(str(chat_id), "user", f"/imagine {prompt}")
+                repo.add_message(
+                    str(chat_id), "assistant", f'[Generated image for: "{prompt}"]'
+                )
+        except Exception as e:
+            logger.error(f"Error generating image: {e}")
+            await update.message.reply_text(
+                "Sorry, I encountered an error while generating your image. Please try again later."
+            )
 
     async def _text_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -228,7 +355,7 @@ class TelegramBot:
             )
 
             await context.bot.send_chat_action(
-                chat_id=chat_id, action=ChatAction.TYPING
+                chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO
             )
 
             file = await context.bot.get_file(photo.file_id)
@@ -249,49 +376,6 @@ class TelegramBot:
                 "Sorry, I couldn't process your image. Please try again later."
             )
 
-    async def _process_image(
-        self, image_data: bytes, caption: str, file_path: str
-    ) -> str:
-        try:
-            base64_image = base64.b64encode(image_data).decode("utf-8")
-
-            mime_types = {
-                "jpg": "image/jpeg",
-                "jpeg": "image/jpeg",
-                "png": "image/png",
-                "gif": "image/gif",
-            }
-
-            file_extension = file_path.split(".")[-1].lower()
-            mime_type = mime_types.get(file_extension)
-            if not mime_type:
-                raise ValueError(f"Unsupported image format: {file_extension}")
-
-            image_content = f"data:{mime_type};base64,{base64_image}"
-
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": caption},
-                        {"type": "image_url", "image_url": {"url": image_content}},
-                    ],
-                }
-            ]
-
-            openai_result = await asyncio.to_thread(
-                self.openai_client.create_chat_completion, messages, model="gpt-4o"
-            )
-
-            if not openai_result.success:
-                return self._get_user_friendly_error_message(openai_result.error)
-
-            return openai_result.value
-
-        except Exception as e:
-            logger.error(f"Error in process_image: {e}")
-            raise
-
     async def _voice_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -302,7 +386,7 @@ class TelegramBot:
 
         try:
             await context.bot.send_chat_action(
-                chat_id=chat_id, action=ChatAction.TYPING
+                chat_id=chat_id, action=ChatAction.UPLOAD_VOICE
             )
             await update.message.reply_text("Processing your voice message...")
 
@@ -435,6 +519,9 @@ class TelegramBot:
 
         if isinstance(error, AudioFileTooLargeError):
             return "Your voice message is too large. Please send a shorter message (under 25MB)."
+
+        if isinstance(error, ImageGenerationError):
+            return "I couldn't generate the image. Please try a different description."
 
         return default_message
 
